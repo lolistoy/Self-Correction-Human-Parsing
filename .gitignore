@@ -3,3 +3,6 @@
 data/
 log/
 pretrain_model/
+.ipynb_checkpoints
+inputs
+outputs
