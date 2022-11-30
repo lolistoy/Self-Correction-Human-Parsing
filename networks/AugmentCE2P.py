@@ -18,9 +18,14 @@ import torch.nn as nn
 from torch.nn import functional as F
 # Note here we adopt the InplaceABNSync implementation from https://github.com/mapillary/inplace_abn
 # By default, the InplaceABNSync module contains a BatchNorm Layer and a LeakyReLu layer
-from modules import InPlaceABNSync
+from modules import InPlaceABNSync, ABN
 
+_ABN = InPlaceABNSync
 BatchNorm2d = functools.partial(InPlaceABNSync, activation='none')
+
+# Uncomment for exporting to onnx
+BatchNorm2d = nn.BatchNorm2d
+_ABN = ABN
 
 affine_par = True
 
@@ -99,17 +104,17 @@ class PSPModule(nn.Module):
         self.bottleneck = nn.Sequential(
             nn.Conv2d(features + len(sizes) * out_features, out_features, kernel_size=3, padding=1, dilation=1,
                       bias=False),
-            InPlaceABNSync(out_features),
+            _ABN(out_features),
         )
 
     def _make_stage(self, features, out_features, size):
         prior = nn.AdaptiveAvgPool2d(output_size=(size, size))
         conv = nn.Conv2d(features, out_features, kernel_size=1, bias=False)
-        bn = InPlaceABNSync(out_features)
+        bn = _ABN(out_features)
         return nn.Sequential(prior, conv, bn)
 
     def forward(self, feats):
-        h, w = feats.size(2), feats.size(3)
+        h, w = int(feats.size(2)), int(feats.size(3))
         priors = [F.interpolate(input=stage(feats), size=(h, w), mode='bilinear', align_corners=True) for stage in
                   self.stages] + [feats]
         bottle = self.bottleneck(torch.cat(priors, 1))
@@ -128,23 +133,23 @@ class ASPPModule(nn.Module):
         self.conv1 = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)),
                                    nn.Conv2d(features, inner_features, kernel_size=1, padding=0, dilation=1,
                                              bias=False),
-                                   InPlaceABNSync(inner_features))
+                                   _ABN(inner_features))
         self.conv2 = nn.Sequential(
             nn.Conv2d(features, inner_features, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(inner_features))
+            _ABN(inner_features))
         self.conv3 = nn.Sequential(
             nn.Conv2d(features, inner_features, kernel_size=3, padding=dilations[0], dilation=dilations[0], bias=False),
-            InPlaceABNSync(inner_features))
+            _ABN(inner_features))
         self.conv4 = nn.Sequential(
             nn.Conv2d(features, inner_features, kernel_size=3, padding=dilations[1], dilation=dilations[1], bias=False),
-            InPlaceABNSync(inner_features))
+            _ABN(inner_features))
         self.conv5 = nn.Sequential(
             nn.Conv2d(features, inner_features, kernel_size=3, padding=dilations[2], dilation=dilations[2], bias=False),
-            InPlaceABNSync(inner_features))
+            _ABN(inner_features))
 
         self.bottleneck = nn.Sequential(
             nn.Conv2d(inner_features * 5, out_features, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(out_features),
+            _ABN(out_features),
             nn.Dropout2d(0.1)
         )
 
@@ -173,15 +178,15 @@ class Edge_Module(nn.Module):
 
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_fea[0], mid_fea, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(mid_fea)
+            _ABN(mid_fea)
         )
         self.conv2 = nn.Sequential(
             nn.Conv2d(in_fea[1], mid_fea, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(mid_fea)
+            _ABN(mid_fea)
         )
         self.conv3 = nn.Sequential(
             nn.Conv2d(in_fea[2], mid_fea, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(mid_fea)
+            _ABN(mid_fea)
         )
         self.conv4 = nn.Conv2d(mid_fea, out_fea, kernel_size=3, padding=1, dilation=1, bias=True)
         self.conv5 = nn.Conv2d(out_fea * 3, out_fea, kernel_size=1, padding=0, dilation=1, bias=True)
@@ -217,23 +222,25 @@ class Decoder_Module(nn.Module):
         super(Decoder_Module, self).__init__()
         self.conv1 = nn.Sequential(
             nn.Conv2d(512, 256, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(256)
+            _ABN(256)
         )
         self.conv2 = nn.Sequential(
             nn.Conv2d(256, 48, kernel_size=1, stride=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(48)
+            _ABN(48)
         )
         self.conv3 = nn.Sequential(
             nn.Conv2d(304, 256, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(256),
+            _ABN(256),
             nn.Conv2d(256, 256, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(256)
+            _ABN(256)
         )
 
         self.conv4 = nn.Conv2d(256, num_classes, kernel_size=1, padding=0, dilation=1, bias=True)
 
     def forward(self, xt, xl):
         _, _, h, w = xl.size()
+        h = int(h)
+        w = int(w)
         xt = F.interpolate(self.conv1(xt), size=(h, w), mode='bilinear', align_corners=True)
         xl = self.conv2(xl)
         x = torch.cat([xt, xl], dim=1)
@@ -244,6 +251,7 @@ class Decoder_Module(nn.Module):
 
 class ResNet(nn.Module):
     def __init__(self, block, layers, num_classes):
+        self._only_parse_output = False
         self.inplanes = 128
         super(ResNet, self).__init__()
         self.conv1 = conv3x3(3, 64, stride=2)
@@ -270,7 +278,7 @@ class ResNet(nn.Module):
 
         self.fushion = nn.Sequential(
             nn.Conv2d(1024, 256, kernel_size=1, padding=0, dilation=1, bias=False),
-            InPlaceABNSync(256),
+            _ABN(256),
             nn.Dropout2d(0.1),
             nn.Conv2d(256, num_classes, kernel_size=1, padding=0, dilation=1, bias=True)
         )
@@ -305,6 +313,8 @@ class ResNet(nn.Module):
         x5 = self.layer4(x4)
         x = self.context_encoding(x5)
         parsing_result, parsing_fea = self.decoder(x, x2)
+        if self._only_parse_output:
+            return parsing_result
         # Edge Branch
         edge_result, edge_fea = self.edge(x2, x3, x4)
         # Fusion Branch

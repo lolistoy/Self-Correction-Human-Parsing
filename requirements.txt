@@ -1,1 +1,5 @@
 opencv-python==4.4.0.46
+onnx
+onnx2keras
+git+https://github.com/onnx/onnx-tensorflow
+tensorflow
